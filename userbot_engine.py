@@ -22,7 +22,7 @@ from config import (
     DEFAULT_DESTINATION_BOT,
     AUTO_JOIN_CHANNELS
 )
-from deepseek_parser import parse_anime_post, decide_inline_action, AnimeRelease
+from deepseek_parser import parse_anime_post, decide_inline_action, extract_final_metadata, AnimeRelease
 from database import (
     is_already_grabbed, 
     log_release, 
@@ -89,10 +89,11 @@ async def interact_with_bot_and_grab_video(release: AnimeRelease) -> Tuple[bool,
     """
     Begona fan-dub boti bilan KO'P BOSQICHLI (MULTI-TURN) muloqot qiladi:
     1. Obunalar va zayavkalarni yuboradi.
-    2. Inline tugmalarni (Til, Sifat, Qism) DeepSeek AI orqali bosib boradi.
+    2. Inline tugmalarni (Fasl, Til, Sifat, Qism) DeepSeek AI orqali bosib boradi.
     3. Videoni sug'urib oladi.
-    4. To'g'ridan-to'g'ri AniRioUz PostgreSQL bazasiga avtomat qo'shadi!
-    5. Shaxsiy botingizga hisobot bilan uzatadi.
+    4. Xabarlar va video sarlavhasidan animening haqiqiy nomini aniqlaydi.
+    5. Ikkala bot bazasiga (aniriouz va nokori_go) avtomatik qo'shadi!
+    6. Shaxsiy botingizga hisobot bilan uzatadi.
     """
     bot = release.bot_username
     start_param = release.start_param
@@ -107,12 +108,12 @@ async def interact_with_bot_and_grab_video(release: AnimeRelease) -> Tuple[bool,
         
         video_message = None
         clicked_history = set()
+        dialog_logs = [f"Yuborildi: {start_cmd}"]
 
         # 2. Ko'p bosqichli AI Avtonom Navigatsiya (7 qadamgacha)
         for turn in range(1, 8):
             await asyncio.sleep(2.5)
             
-            # So'nggi xabarlarni tekshirish
             recent_msgs = await client.get_messages(bot, limit=5)
             
             # A) Agar video kelgan bo'lsa -> To'xtatish
@@ -125,7 +126,7 @@ async def interact_with_bot_and_grab_video(release: AnimeRelease) -> Tuple[bool,
                 logger.info(f"🎉 Video topildi! (Turn {turn})")
                 break
 
-            # B) Agar video hali kelmagan bo'lsa, eng so'nggi bot xabarini tahlil qilish
+            # B) Eng so'nggi bot xabarini tahlil qilish
             latest_bot_msg = None
             for m in recent_msgs:
                 if not m.out:
@@ -134,6 +135,9 @@ async def interact_with_bot_and_grab_video(release: AnimeRelease) -> Tuple[bool,
 
             if not latest_bot_msg:
                 continue
+
+            bot_text = latest_bot_msg.text or latest_bot_msg.raw_text or ""
+            dialog_logs.append(f"Bot xabari: {bot_text}")
 
             # Majburiy kanallarni topish va a'zo bo'lish
             await extract_and_join_required_channels(latest_bot_msg)
@@ -155,10 +159,13 @@ async def interact_with_bot_and_grab_video(release: AnimeRelease) -> Tuple[bool,
                             idx += 1
 
                 if buttons_list:
+                    btn_texts = [b["text"] for b in buttons_list]
+                    dialog_logs.append(f"Mavjud tugmalar: {btn_texts}")
+
                     decision = await decide_inline_action(
                         target_anime=release.anime_name,
                         target_episode=release.episode,
-                        bot_message_text=latest_bot_msg.text or "",
+                        bot_message_text=bot_text,
                         buttons=buttons_list
                     )
                     
@@ -174,6 +181,7 @@ async def interact_with_bot_and_grab_video(release: AnimeRelease) -> Tuple[bool,
                             chosen_text = buttons_list[b_idx]["text"]
 
                         clicked_history.add(btn_key)
+                        dialog_logs.append(f"Bosildi: {chosen_text}")
                         logger.info(f"🎯 AI Qadami ({turn}): '{chosen_text}' bosilmoqda (Sabab: {reason})")
                         
                         try:
@@ -191,7 +199,19 @@ async def interact_with_bot_and_grab_video(release: AnimeRelease) -> Tuple[bool,
 
         logger.info(f"✅ Video muvaffaqiyatli qabul qilindi! ID={video_message.id}")
 
-        # 3. Telegram Bot API standartidagi `file_id` ni olish
+        # 3. Video va butun dialogdan HAQIQIY Anime Nomini aniqlash (DeepSeek Final Metadata)
+        video_caption = video_message.text or video_message.raw_text or ""
+        final_meta = await extract_final_metadata(
+            bot_username=bot,
+            start_param=start_param,
+            dialog_logs=dialog_logs,
+            video_caption=video_caption,
+            default_anime=release.anime_name,
+            default_ep=release.episode
+        )
+        logger.info(f"💎 Aniqlandi: {final_meta.anime_name} | {final_meta.season}-mavsum {final_meta.episode}-qism ({final_meta.studio})")
+
+        # 4. Telegram Bot API standartidagi `file_id` ni olish
         bot_file_id = ""
         try:
             bot_file_id = pack_bot_file_id(video_message.media)
@@ -199,22 +219,22 @@ async def interact_with_bot_and_grab_video(release: AnimeRelease) -> Tuple[bool,
         except Exception as e:
             logger.warning(f"File ID generatsiyasida xatolik: {e}")
 
-        # 4. PostgreSQL bazasiga avtomatik qo'shish (aniriouz / TarjimaAnimelar)
+        # 5. PostgreSQL bazasiga avtomatik qo'shish (AniRioUz va Nokori-Go)
         db_synced, db_msg, unique_code = sync_episode_to_bot_database(
-            anime_name=release.anime_name,
-            season=release.season,
-            episode_number=release.episode,
-            studio=release.studio,
+            anime_name=final_meta.anime_name,
+            season=final_meta.season,
+            episode_number=final_meta.episode,
+            studio=final_meta.studio,
             video_file_id=bot_file_id or str(video_message.id)
         )
 
-        # 5. Videoni shaxsiy botingizga jo'natish
-        code_badge = f"\n\n⚡️ **Bazada faollashdi!**\n🆔 Anime Kodi: `#{unique_code}`\n🔢 Qism: `{release.episode}-qism`\n👉 Foydalanuvchilar botda `#{unique_code}` kodini yozib darhol tomosha qila olishadi!" if db_synced else ""
+        # 6. Videoni shaxsiy botingizga jo'natish
+        code_badge = f"\n\n⚡️ **Bazada faollashdi!**\n🆔 Anime Kodi: `#{unique_code}`\n🔢 Qism: `{final_meta.episode}-qism`\n👉 Foydalanuvchilar botda `#{unique_code}` kodini yozib darhol tomosha qila olishadi!" if db_synced else ""
         
         caption = (
-            f"🎬 **{release.anime_name}** | {release.season}-Mavsum {release.episode}-Qism\n"
-            f"🎙 **Dublyaj:** {release.studio}\n"
-            f"🎞 **Sifat:** {release.quality}\n"
+            f"🎬 **{final_meta.anime_name}** | {final_meta.season}-Mavsum {final_meta.episode}-Qism\n"
+            f"🎙 **Dublyaj:** {final_meta.studio}\n"
+            f"🎞 **Sifat:** {final_meta.quality}\n"
             f"{code_badge}\n\n"
             f"📥 Avtomatik yuklandi: {bot}"
         )
@@ -227,24 +247,24 @@ async def interact_with_bot_and_grab_video(release: AnimeRelease) -> Tuple[bool,
                 caption=caption
             )
             update_status(
-                release.anime_name, 
-                release.season, 
-                release.episode, 
-                release.studio, 
+                final_meta.anime_name, 
+                final_meta.season, 
+                final_meta.episode, 
+                final_meta.studio, 
                 "COMPLETED", 
                 sent.id
             )
         else:
             update_status(
-                release.anime_name, 
-                release.season, 
-                release.episode, 
-                release.studio, 
+                final_meta.anime_name, 
+                final_meta.season, 
+                final_meta.episode, 
+                final_meta.studio, 
                 "COMPLETED", 
                 video_message.id
             )
 
-        return True, f"Muvaffaqiyatli yuklandi va bazaga qo'shildi! (Kod: #{unique_code})"
+        return True, f"Muvaffaqiyatli yuklandi va bazaga qo'shildi! (Kod: #{unique_code}, Anime: {final_meta.anime_name})"
 
     except Exception as e:
         logger.error(f"Bot bilan muloqotda xatolik: {e}", exc_info=True)
@@ -259,7 +279,6 @@ async def handle_channel_message(event):
         return
 
     chat = await event.get_chat()
-    chat_title = getattr(chat, 'title', 'Kanal')
     chat_username = getattr(chat, 'username', str(chat.id))
     
     release = await parse_anime_post(text)
@@ -371,24 +390,20 @@ async def handle_admin_commands(event):
             await reply_or_edit("❌ Havolani kiriting: `.grab https://t.me/amediatarjima_bot?start=jjk18`")
             return
         
-        await reply_or_edit(f"⏳ **AI Avtonom Yuklash Boshlandi...**\n🔗 Havola: `{arg}`\n\n🧠 1-Qadam: DeepSeek AI havolani tahlil qilmoqda...")
+        await reply_or_edit(f"⏳ **AI Avtonom Yuklash Boshlandi...**\n🔗 Havola: `{arg}`\n\n🧠 DeepSeek AI havolani tahlil qilmoqda...")
         
         release = await parse_anime_post(f"Anime yuklash: {arg}")
         if release and release.bot_username:
             await reply_or_edit(
                 f"⏳ **AI Avtonom Yuklash:**\n"
-                f"🎬 Anime: `{release.anime_name}` ({release.episode}-qism)\n"
                 f"🤖 Bot: `{release.bot_username}`\n"
-                f"🕹 2-Qadam: Inline tugmalar va obunalar tekshirilmoqda..."
+                f"🕹 Inline tugmalar va obunalar tekshirilmoqda..."
             )
             
             success, message = await interact_with_bot_and_grab_video(release)
             if success:
                 await reply_or_edit(
                     f"🎉 **Muvaffaqiyatli Yakunlandi!**\n\n"
-                    f"🎬 **Anime:** `{release.anime_name}`\n"
-                    f"🔢 **Qism:** `{release.episode}-qism`\n"
-                    f"🎙 **Dublyaj:** `{release.studio}`\n"
                     f"📦 **Holat:** {message}\n"
                     f"🤖 **Yetkazildi:** `{get_current_destination_bot()}`"
                 )
@@ -410,4 +425,3 @@ async def handle_admin_commands(event):
             "• `.help` — Ushbu yordam oynasi"
         )
         await reply_or_edit(help_text)
-EOF

@@ -13,27 +13,24 @@ client = AsyncOpenAI(
 )
 
 class AnimeRelease(BaseModel):
-    is_anime_release: bool = Field(description="Post haqiqatan ham yangi anime qismi relizi haqidami?")
-    anime_name: Optional[str] = Field(default="", description="Animening to'liq va rasmiy nomi")
+    is_anime_release: bool = Field(description="Post yangi anime qismi relizi haqidami?")
+    anime_name: str = Field(default="Anime", description="Animening to'liq va rasmiy nomi")
     season: int = Field(default=1, description="Anime mavsumi (1, 2, 3...)")
-    episode: Optional[int] = Field(default=1, description="Qism raqami (masalan 1, 18, 24)")
-    studio: Optional[str] = Field(default="Uzbekcha", description="Dublyaj studiyasi (Amedia, UzDub, FanDub, AniDub va h.k.)")
-    quality: Optional[str] = Field(default="720p", description="Sifat (720p, 1080p, 480p)")
-    bot_username: Optional[str] = Field(default="", description="Postdagi bot username (@belgisi bilan, masalan @amediatarjima_bot)")
-    start_param: Optional[str] = Field(default="", description="Botga yuboriladigan start parametri")
+    episode: int = Field(default=1, description="Qism raqami (1, 11, 24...)")
+    studio: str = Field(default="Uzbekcha", description="Dublyaj studiyasi (UzDub, Amedia, FanDub va h.k.)")
+    quality: str = Field(default="720p", description="Sifat (720p, 1080p, 480p)")
+    bot_username: Optional[str] = Field(default="", description="Postdagi bot username (@bot_nomi)")
+    start_param: Optional[str] = Field(default="", description="Bot start parametri")
     summary: Optional[str] = Field(default="", description="Qisqa izoh")
 
 async def parse_anime_post(text: str) -> Optional[AnimeRelease]:
-    """
-    DeepSeek AI orqali Telegram kanalidagi har qanday chalkash postni tahlil qilib,
-    toza va tuzilgan ma'lumotlarni chiqarib oladi.
-    """
+    """Kanal postidagi bot havolasi va anime ma'lumotlarini aniqlaydi."""
     if not text or len(text.strip()) < 3:
         return None
 
     prompt = f"""
-Siz Telegramdagi O'zbek anime kanallari postlarini tahlil qiluvchi professional AIsiz.
-Quyidagi post matnini o'rganib chiqing va JSON formatida javob qaytaring.
+Siz Telegram O'zbek anime kanallari postlarini tahlil qiluvchi professional AI (DeepSeek V4-Flash)siz.
+Quyidagi post matnini o'rganib, toza JSON qaytaring:
 
 Post matni:
 \"\"\"
@@ -41,53 +38,45 @@ Post matni:
 \"\"\"
 
 Talablar:
-1. Agar post shunchaki reklama, suhbat yoki yangilik bo'lsa va unda yangi qism videosi/boti bo'lmasa, `is_anime_release: false` qiling.
-2. Agar bu yangi anime qismi yoki bot havolasi bo'lsa:
-   - `anime_name`: Animening to'g'ri, to'liq nomini yozing (masalan "JJK 2" bo'lsa -> "Jujutsu Kaisen Season 2", "Solo Leveling 7" -> "Solo Leveling").
-   - `season`: Fasl raqami (default 1).
-   - `episode`: Aniq qism raqami (agar aniqlanmasa 1).
-   - `studio`: Dublyaj qilgan jamoa (Amedia, UzDub, FanDub, AnimeUz, TarjimaKinolar va h.k.).
-   - `bot_username`: Post ichidagi havola qaysi botga olib borsa, o'sha botning @username ni aniqlang (masalan @amediatarjima_bot).
-   - `start_param`: Agar havola `t.me/bot?start=xyz` yoki `tg://resolve?domain=bot&start=xyz` ko'rinishida bo'lsa, `start` dan keyingi parametrni oling.
+- `anime_name`: Animening to'g'ri nomini aniqlang (masalan "Solo Leveling", "Jujutsu Kaisen").
+- `season`: Fasl raqami (default 1).
+- `episode`: Qism raqami (default 1).
+- `studio`: Dublyaj jamoasi.
+- `bot_username`: @username (masalan @AniMacUzbot).
+- `start_param`: Havoladagi start kodi (masalan "down_11").
 
-Faqat va faqat quyidagi toza JSON formatida javob bering, boshqa hech narsa yozmang:
+JSON Format:
 {{
   "is_anime_release": true,
-  "anime_name": "Jujutsu Kaisen",
-  "season": 2,
-  "episode": 18,
-  "studio": "Amedia",
+  "anime_name": "Solo Leveling",
+  "season": 3,
+  "episode": 11,
+  "studio": "Uzbekcha",
   "quality": "720p",
-  "bot_username": "@bot_nomi",
-  "start_param": "param_kodi",
-  "summary": "Jujutsu Kaisen 2-mavsum 18-qism Amedia dublyajida"
+  "bot_username": "@AniMacUzbot",
+  "start_param": "down_11",
+  "summary": "Solo Leveling 3-mavsum 11-qism"
 }}
 """
     try:
         response = await client.chat.completions.create(
             model=DEEPSEEK_MODEL,
             messages=[
-                {"role": "system", "content": "Sen faqat toza JSON qaytaruvchi aqlli tahlilchisiz."},
+                {"role": "system", "content": "Sen o'ta aqlli va tezkor anime tahlilchisisan. Faqat toza JSON qaytar."},
                 {"role": "user", "content": prompt}
             ],
             response_format={"type": "json_object"},
             temperature=0.1
         )
-        content = response.choices[0].message.content.strip()
-        data = json.loads(content)
-        
+        data = json.loads(response.choices[0].message.content.strip())
         if data.get("bot_username"):
             bot = data["bot_username"].strip()
             if not bot.startswith("@") and not bot.startswith("http"):
                 bot = "@" + bot
             data["bot_username"] = bot
-
-        if not data.get("episode"):
-            data["episode"] = 1
-
         return AnimeRelease(**data)
     except Exception as e:
-        logger.error(f"DeepSeek tahlilida xatolik: {e}")
+        logger.error(f"DeepSeek tahlil xatosi: {e}")
         return None
 
 async def decide_inline_action(
@@ -97,9 +86,7 @@ async def decide_inline_action(
     buttons: List[Dict[str, Any]]
 ) -> Optional[Dict[str, Any]]:
     """
-    Begona botning har qanday ko'p bosqichli inline tugmalari orasidan
-    eng to'g'ri tugmani (Obunani tekshirish, Til tanlash, Sifat tanlash, Qism tanlash)
-    aniqlaydi.
+    Begona botning inline tugmalari orasidan eng to'g'ri tugmani aniqlaydi.
     """
     if not buttons:
         return None
@@ -108,47 +95,112 @@ async def decide_inline_action(
     prompt = f"""
 Telegram Anime Bot foydalanuvchiga quyidagi xabarni va inline tugmalarni ko'rsatmoqda:
 
-Maqsadimiz:
+Bizning Maqsadimiz:
 - Anime: "{target_anime}"
 - Qism: {target_episode}-qism
-- Biz O'ZBEKCHA dublyajdagi videoni yuklab olmoqchimiz (agar sifat so'ralsa 720p yoki 1080p).
+- Biz O'ZBEKCHA dublyajdagi videoni yuklab olmoqchimiz (sifat: 720p/1080p).
 
 Bot xabari:
 \"\"\"
 {bot_message_text}
 \"\"\"
 
-Mavjud Inline Tugmalar:
+Inline Tugmalar:
 {buttons_json}
 
 Vazifa:
-1. Ushbu tugmalar ichidan qaysi birini bosish kerakligini aniqlang.
-   - Agar bu Obunani tekshirish bo'lsa -> "✅ Obunani tekshirish", "Tekshirish", "Tasdiqlash", "Start" tugmasini tanlang.
-   - Agar bu Til tanlash bo'lsa -> "🇺🇿 O'zbekcha", "Uzbek", "Tarjima" tugmasini tanlang.
-   - Agar bu Sifat tanlash bo'lsa -> "720p", "1080p", "HD" tugmasini tanlang.
-   - Agar bu Qismlar ro'yxati bo'lsa -> "{target_episode}-qism" yoki unga eng yaqin qism tugmasini tanlang.
-   - Agar bu "Yuklab olish" / "Tomosha qilish" bo'lsa -> o'sha tugmani tanlang.
+Qaysi tugmani bosish kerak?
+- Obunani tekshirish bo'lsa -> "✅ Obunani tekshirish", "Tekshirish", "Start"
+- Fasl/Anime tanlash bo'lsa -> Fasl yoki anime nomi yozilgan tugma (masalan "{target_anime} 3-fasl")
+- Til tanlash bo'lsa -> "🇺🇿 O'zbekcha", "Uzbek"
+- Sifat tanlash bo'lsa -> "720p", "1080p", "HD"
+- Qismlar bo'lsa -> "{target_episode}-qism"
 
 Format (Faqat toza JSON):
 {{
-  "selected_text": "Tugma ustidagi aniq matn",
+  "selected_text": "Tugmadagi matn",
   "button_index": 0,
-  "reason": "O'zbek tili tanlandi"
+  "reason": "Tanlov sababi"
 }}
 """
     try:
         response = await client.chat.completions.create(
             model=DEEPSEEK_MODEL,
             messages=[
-                {"role": "system", "content": "Siz Telegram botlarining inline interfeysini mukammal tushunuvchi aqlli AIsiz. Faqat JSON qaytaring."},
+                {"role": "system", "content": "Siz Telegram botlari bilan muloqot qiluvchi mutaxassis AIsiz. Faqat JSON qaytaring."},
                 {"role": "user", "content": prompt}
             ],
             response_format={"type": "json_object"},
             temperature=0.1
         )
-        content = response.choices[0].message.content.strip()
-        res = json.loads(content)
-        return res
+        return json.loads(response.choices[0].message.content.strip())
     except Exception as e:
-        logger.error(f"DeepSeek inline tugma tanlashida xatolik: {e}")
-        return {"selected_text": buttons[0].get("text"), "button_index": 0, "reason": "Default fallback"}
+        logger.error(f"DeepSeek inline tanlov xatosi: {e}")
+        return {"selected_text": buttons[0].get("text"), "button_index": 0, "reason": "Fallback"}
+
+async def extract_final_metadata(
+    bot_username: str,
+    start_param: str,
+    dialog_logs: List[str],
+    video_caption: str,
+    default_anime: str = "Anime",
+    default_ep: int = 1
+) -> AnimeRelease:
+    """
+    Video qabul qilingandan so'ng botdan olingan barcha xabarlar,
+    bosilgan tugmalar va video sarlavhasidan animening 100% HAQIQIY NOMINI ajratadi.
+    """
+    context = "\n".join(dialog_logs)
+    prompt = f"""
+Biz Telegram anime botidan video yuklab oldik:
+- Bot: {bot_username} (param: {start_param})
+- Muloqot va bosilgan tugmalar tarixi:
+\"\"\"
+{context}
+\"\"\"
+- Video sarlavhasi (caption):
+\"\"\"
+{video_caption}
+\"\"\"
+
+Vazifa:
+Ushbu ma'lumotlar asosida animening to'liq va aniq nomini, mavsumini (faslini), qismini va dublyaj studiyasini aniqlang.
+Hech qachon shunchaki "Anime" deb qoldirmang, haqiqiy nomini yozing (masalan "Solo Leveling", "Jujutsu Kaisen", "Naruto").
+
+JSON Format:
+{{
+  "is_anime_release": true,
+  "anime_name": "Solo Leveling",
+  "season": 3,
+  "episode": 11,
+  "studio": "UzDub",
+  "quality": "720p",
+  "summary": "Solo Leveling 3-mavsum 11-qism"
+}}
+"""
+    try:
+        response = await client.chat.completions.create(
+            model=DEEPSEEK_MODEL,
+            messages=[
+                {"role": "system", "content": "Siz anime nomlarini aniqlovchi mutaxassissiz. Faqat toza JSON qaytaring."},
+                {"role": "user", "content": prompt}
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.1
+        )
+        data = json.loads(response.choices[0].message.content.strip())
+        data["bot_username"] = bot_username
+        data["start_param"] = start_param
+        return AnimeRelease(**data)
+    except Exception as e:
+        logger.error(f"Final metadata tahlilida xatolik: {e}")
+        return AnimeRelease(
+            is_anime_release=True,
+            anime_name=default_anime,
+            season=1,
+            episode=default_ep,
+            studio="Uzbekcha",
+            quality="720p",
+            bot_username=bot_username,
+            start_param=start_param
+        )
