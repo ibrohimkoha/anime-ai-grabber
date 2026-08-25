@@ -10,6 +10,7 @@ API_ID = int(os.getenv("TELEGRAM_API_ID", "0"))
 API_HASH = os.getenv("TELEGRAM_API_HASH", "")
 PHONE_NUMBER = os.getenv("TELEGRAM_PHONE", "")
 SESSION_NAME = str(BASE_DIR / os.getenv("SESSION_NAME", "anime_userbot_session"))
+SESSION_STRING = os.getenv("TELEGRAM_SESSION_STRING", "")
 
 # DeepSeek AI Configuration
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
@@ -19,7 +20,7 @@ DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 # Default Monitored Channels
 DEFAULT_TARGET_CHANNELS = os.getenv("TARGET_CHANNELS", "@amediatarjima,@anidubuz")
 
-# Default Destination Bot (videolar jo'natiladigan shaxsiy bot)
+# Default Destination Bot
 DEFAULT_DESTINATION_BOT = os.getenv("DESTINATION_BOT", "@Tarjima_Animelarrbot")
 
 # Automation flags

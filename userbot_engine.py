@@ -3,6 +3,7 @@ import asyncio
 import logging
 from typing import Optional, List
 from telethon import TelegramClient, events, functions, types
+from telethon.sessions import StringSession
 from telethon.tl.types import (
     KeyboardButtonUrl, 
     KeyboardButtonCallback, 
@@ -15,6 +16,7 @@ from config import (
     API_HASH, 
     PHONE_NUMBER, 
     SESSION_NAME, 
+    SESSION_STRING,
     DEFAULT_TARGET_CHANNELS, 
     DEFAULT_DESTINATION_BOT,
     AUTO_JOIN_CHANNELS
@@ -31,7 +33,10 @@ from database import (
 
 logger = logging.getLogger("UserbotEngine")
 
-client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
+if SESSION_STRING:
+    client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
+else:
+    client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
 
 def get_current_destination_bot() -> str:
     """Joriy qabul qiluvchi bot nomini bazadan oladi."""
@@ -237,56 +242,63 @@ async def handle_channel_message(event):
 async def handle_admin_commands(event):
     """Foydalanuvchi o'ziga o'zi (Saved Messages) yoki istalgan chatda buyruq berganda."""
     msg = event.message
-    text = (msg.text or "").strip()
+    text = (msg.text or msg.raw_text or "").strip()
     if not text.startswith("."):
         return
 
+    logger.info(f"⚡️ Admin buyruq qabul qilindi: {text}")
     parts = text.split(maxsplit=1)
     cmd = parts[0].lower()
     arg = parts[1].strip() if len(parts) > 1 else ""
 
+    async def reply_or_edit(content: str):
+        try:
+            await msg.edit(content)
+        except Exception:
+            await msg.reply(content)
+
     if cmd == ".setbot":
         if not arg:
-            await msg.reply("❌ Bot nomini kiriting: `.setbot @Tarjima_Animelarrbot`")
+            await reply_or_edit("❌ Bot nomini kiriting: `.setbot @Tarjima_Animelarrbot`")
             return
         bot_name = arg if arg.startswith("@") else f"@{arg}"
         set_setting("destination_bot", bot_name)
-        await msg.reply(f"✅ **Qabul qiluvchi bot muvaffaqiyatli o'zgartirildi!**\n🤖 Joriy bot: `{bot_name}`\nBarcha yuklangan videolar endi shu botga boradi.")
+        await reply_or_edit(f"✅ **Qabul qiluvchi bot muvaffaqiyatli o'zgartirildi!**\n🤖 Joriy bot: `{bot_name}`\nBarcha yuklangan videolar endi shu botga boradi.")
 
     elif cmd == ".bot":
         current_bot = get_current_destination_bot()
-        await msg.reply(f"🤖 **Joriy qabul qiluvchi bot:** `{current_bot or 'Belgilanmagan'}`\nO'zgartirish uchun: `.setbot @YangiBot`")
+        await reply_or_edit(f"🤖 **Joriy qabul qiluvchi bot:** `{current_bot or 'Belgilanmagan'}`\nO'zgartirish uchun: `.setbot @YangiBot`")
 
     elif cmd == ".addchannel":
         if not arg:
-            await msg.reply("❌ Kanal nomini kiriting: `.addchannel @amediatarjima`")
+            await reply_or_edit("❌ Kanal nomini kiriting: `.addchannel @amediatarjima`")
             return
         ch_name = arg if arg.startswith("@") else f"@{arg}"
         current = get_monitored_channels()
         if ch_name not in current:
             current.append(ch_name)
             set_setting("target_channels", ",".join(current))
-            await msg.reply(f"✅ Kanal ro'yxatga qo'shildi: `{ch_name}`")
+            await reply_or_edit(f"✅ Kanal ro'yxatga qo'shildi: `{ch_name}`")
         else:
-            await msg.reply(f"ℹ️ Ushbu kanal allaqachon ro'yxatda bor: `{ch_name}`")
+            await reply_or_edit(f"ℹ️ Ushbu kanal allaqachon ro'yxatda bor: `{ch_name}`")
 
     elif cmd == ".delchannel":
         if not arg:
-            await msg.reply("❌ O'chiriladigan kanalni kiriting: `.delchannel @amediatarjima`")
+            await reply_or_edit("❌ O'chiriladigan kanalni kiriting: `.delchannel @amediatarjima`")
             return
         ch_name = arg if arg.startswith("@") else f"@{arg}"
         current = get_monitored_channels()
         if ch_name in current:
             current.remove(ch_name)
             set_setting("target_channels", ",".join(current))
-            await msg.reply(f"🗑 Kanal ro'yxatdan o'chirildi: `{ch_name}`")
+            await reply_or_edit(f"🗑 Kanal ro'yxatdan o'chirildi: `{ch_name}`")
         else:
-            await msg.reply(f"❌ Kanal topilmadi: `{ch_name}`")
+            await reply_or_edit(f"❌ Kanal topilmadi: `{ch_name}`")
 
     elif cmd == ".channels":
         channels = get_monitored_channels()
         ch_list = "\n".join([f"  • `{c}`" for c in channels]) if channels else "Hech qanday kanal kiritilmagan."
-        await msg.reply(f"📢 **Kuzatilayotgan Fan-Dub Kanallari:**\n{ch_list}\n\nQo'shish: `.addchannel @kanal`\nO'chirish: `.delchannel @kanal`")
+        await reply_or_edit(f"📢 **Kuzatilayotgan Fan-Dub Kanallari:**\n{ch_list}\n\nQo'shish: `.addchannel @kanal`\nO'chirish: `.delchannel @kanal`")
 
     elif cmd == ".status":
         stats = get_stats()
@@ -301,23 +313,22 @@ async def handle_admin_commands(event):
             f"❌ **Xatolik bo'lgan:** `{stats['failed']} ta`\n\n"
             "🟢 Tizim 24/7 faol ishlamoqda."
         )
-        await msg.reply(status_text)
+        await reply_or_edit(status_text)
 
     elif cmd == ".grab":
         if not arg:
-            await msg.reply("❌ Havolani kiriting: `.grab https://t.me/amediatarjima_bot?start=jjk18`")
+            await reply_or_edit("❌ Havolani kiriting: `.grab https://t.me/amediatarjima_bot?start=jjk18`")
             return
-        await msg.reply(f"⏳ Qo'lda yuklash boshlandi: `{arg}`...")
-        # DeepSeek orqali linkni tahlil qilish
+        await reply_or_edit(f"⏳ Qo'lda yuklash boshlandi: `{arg}`...")
         release = await parse_anime_post(f"Ko'rish havolasi: {arg}")
         if release and release.bot_username:
             success = await interact_with_bot_and_grab_video(release)
             if success:
-                await msg.reply(f"✅ Video muvaffaqiyatli yuklandi va `{get_current_destination_bot()}` ga yuborildi!")
+                await reply_or_edit(f"✅ Video muvaffaqiyatli yuklandi va `{get_current_destination_bot()}` ga yuborildi!")
             else:
-                await msg.reply("❌ Videoni yuklashda xatolik yuz berdi.")
+                await reply_or_edit("❌ Videoni yuklashda xatolik yuz berdi.")
         else:
-            await msg.reply("❌ Havoladan bot ma'lumotlari aniqlanmadi.")
+            await reply_or_edit("❌ Havoladan bot ma'lumotlari aniqlanmadi.")
 
     elif cmd == ".help":
         help_text = (
@@ -331,4 +342,4 @@ async def handle_admin_commands(event):
             "• `.grab <havola>` — Istalgan bot havolasini darhol yuklash\n"
             "• `.help` — Ushbu yordam oynasi"
         )
-        await msg.reply(help_text)
+        await reply_or_edit(help_text)

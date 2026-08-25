@@ -2,9 +2,12 @@ import sqlite3
 from datetime import datetime
 from config import DB_PATH
 
+def get_db():
+    return sqlite3.connect(DB_PATH, timeout=30.0)
+
 def init_db():
     """Ma'lumotlar bazasi jadvallarini yaratadi."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db()
     cursor = conn.cursor()
     
     # 1. Sozlamalar jadvali (Telegram orqali dinamik boshqarish uchun)
@@ -41,7 +44,7 @@ def init_db():
 
 def get_setting(key: str, default: str = "") -> str:
     """Sozlamani bazadan oladi."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db()
     cursor = conn.cursor()
     cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
     row = cursor.fetchone()
@@ -50,7 +53,7 @@ def get_setting(key: str, default: str = "") -> str:
 
 def set_setting(key: str, value: str):
     """Sozlamani bazaga saqlaydi yoki yangilaydi."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db()
     cursor = conn.cursor()
     cursor.execute("""
         INSERT INTO settings (key, value) VALUES (?, ?)
@@ -63,7 +66,7 @@ def is_already_grabbed(anime_name: str, season: int, episode: int, studio: str) 
     """Ushbu qism allaqachon yuklanganligini tekshiradi."""
     if not anime_name or not episode:
         return False
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db()
     cursor = conn.cursor()
     cursor.execute("""
         SELECT id FROM grabbed_releases 
@@ -77,7 +80,7 @@ def log_release(source_channel: str, source_msg_id: int, anime_name: str,
                 season: int, episode: int, studio: str, bot_username: str, 
                 start_param: str, status: str = "PENDING", video_msg_id: int = None):
     """Yangi ushlangan relizni bazaga yozadi."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db()
     cursor = conn.cursor()
     cursor.execute("""
         INSERT OR REPLACE INTO grabbed_releases 
@@ -89,7 +92,7 @@ def log_release(source_channel: str, source_msg_id: int, anime_name: str,
 
 def update_status(anime_name: str, season: int, episode: int, studio: str, status: str, video_msg_id: int = None):
     """Reliz holatini yangilaydi (COMPLETED / FAILED)."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db()
     cursor = conn.cursor()
     cursor.execute("""
         UPDATE grabbed_releases 
@@ -101,7 +104,7 @@ def update_status(anime_name: str, season: int, episode: int, studio: str, statu
 
 def get_stats():
     """Statistikani qaytaradi."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db()
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*) FROM grabbed_releases WHERE status = 'COMPLETED'")
     completed = cursor.fetchone()[0]
