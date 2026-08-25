@@ -34,6 +34,7 @@ from database import (
     get_stats
 )
 from bot_db_sync import sync_episode_to_bot_database
+from destination_bot_admin import upload_episode_via_admin_flow
 
 logger = logging.getLogger("UserbotEngine")
 
@@ -55,7 +56,6 @@ def extract_all_links_and_entities_from_msg(msg: types.Message) -> str:
     """Kanal postidagi barcha yashirin havolalar, matn va inline tugmalarni birlashtiradi."""
     combined_texts = [msg.text or msg.raw_text or ""]
     
-    # 1. Yashirin matn havolalari (Entity Links)
     if msg.entities:
         for ent in msg.entities:
             if isinstance(ent, MessageEntityTextUrl) and ent.url:
@@ -68,7 +68,6 @@ def extract_all_links_and_entities_from_msg(msg: types.Message) -> str:
                 if url_snippet:
                     combined_texts.append(f"Havola: {url_snippet}")
 
-    # 2. Kanal postiga biriktirilgan Inline tugmalar (Inline Buttons)
     if msg.reply_markup and isinstance(msg.reply_markup, ReplyInlineMarkup):
         for row in msg.reply_markup.rows:
             for btn in row.buttons:
@@ -124,7 +123,7 @@ async def interact_with_bot_and_grab_video(release: AnimeRelease) -> Tuple[bool,
     3. Videoni sug'urib oladi.
     4. Xabarlar va video sarlavhasidan animening haqiqiy nomini aniqlaydi.
     5. Ikkala bot bazasiga (aniriouz va nokori_go) avtomatik qo'shadi!
-    6. Shaxsiy botingizga hisobot bilan uzatadi.
+    6. Shaxsiy botingizga (/admin inline orqali) videoni joylaydi.
     """
     bot = release.bot_username
     start_param = release.start_param
@@ -250,7 +249,7 @@ async def interact_with_bot_and_grab_video(release: AnimeRelease) -> Tuple[bool,
         except Exception as e:
             logger.warning(f"File ID generatsiyasida xatolik: {e}")
 
-        # 5. PostgreSQL bazasiga avtomatik qo'shish (AniRioUz va Nokori-Go)
+        # 5. PostgreSQL bazalariga avtomatik qo'shish (AniRioUz va Nokori-Go)
         db_synced, db_msg, unique_code = sync_episode_to_bot_database(
             anime_name=final_meta.anime_name,
             season=final_meta.season,
@@ -259,23 +258,15 @@ async def interact_with_bot_and_grab_video(release: AnimeRelease) -> Tuple[bool,
             video_file_id=bot_file_id or str(video_message.id)
         )
 
-        # 6. Videoni shaxsiy botingizga jo'natish
-        code_badge = f"\n\n⚡️ **Bazada faollashdi!**\n🆔 Anime Kodi: `#{unique_code}`\n🔢 Qism: `{final_meta.episode}-qism`\n👉 Foydalanuvchilar botda `#{unique_code}` kodini yozib darhol tomosha qila olishadi!" if db_synced else ""
-        
-        caption = (
-            f"🎬 **{final_meta.anime_name}** | {final_meta.season}-Mavsum {final_meta.episode}-Qism\n"
-            f"🎙 **Dublyaj:** {final_meta.studio}\n"
-            f"🎞 **Sifat:** {final_meta.quality}\n"
-            f"{code_badge}\n\n"
-            f"📥 Avtomatik yuklandi: {bot}"
-        )
-
+        # 6. Shaxsiy botingizga (/admin inline menyusi orqali) yuklash
         if dest_bot:
-            logger.info(f"🚀 Video shaxsiy botingizga yuborilmoqda: {dest_bot}")
-            sent = await client.send_file(
-                dest_bot,
-                video_message.media,
-                caption=caption
+            logger.info(f"🚀 {dest_bot} botiga /admin inline orqali yuklanmoqda...")
+            admin_ok, admin_msg = await upload_episode_via_admin_flow(
+                client=client,
+                dest_bot=dest_bot,
+                release=final_meta,
+                unique_code=unique_code or 1,
+                video_message=video_message
             )
             update_status(
                 final_meta.anime_name, 
@@ -283,7 +274,7 @@ async def interact_with_bot_and_grab_video(release: AnimeRelease) -> Tuple[bool,
                 final_meta.episode, 
                 final_meta.studio, 
                 "COMPLETED", 
-                sent.id
+                video_message.id
             )
         else:
             update_status(
@@ -295,7 +286,7 @@ async def interact_with_bot_and_grab_video(release: AnimeRelease) -> Tuple[bool,
                 video_message.id
             )
 
-        return True, f"Muvaffaqiyatli yuklandi va bazaga qo'shildi! (Kod: #{unique_code}, Anime: {final_meta.anime_name})"
+        return True, f"Muvaffaqiyatli yuklandi va inline /admin orqali botga joylandi! (Kod: #{unique_code}, Anime: {final_meta.anime_name})"
 
     except Exception as e:
         logger.error(f"Bot bilan muloqotda xatolik: {e}", exc_info=True)
@@ -306,7 +297,6 @@ async def handle_channel_message(event):
     """Kuzatilayotgan kanallarga yangi post kelganda ishga tushadi (Matn, Yashirin Havola va Inline Tugmalar)."""
     msg = event.message
     
-    # 1. Barcha matn, linklar va inline tugmalarni olish
     full_content = extract_all_links_and_entities_from_msg(msg)
     if not full_content:
         return
@@ -317,7 +307,6 @@ async def handle_channel_message(event):
     
     logger.info(f"📢 Kanalda yangi post aniqlandi: '{chat_title}' (@{chat_username})")
 
-    # 2. DeepSeek orqali post va inline tugmalarni tahlil qilish
     release = await parse_anime_post(full_content)
     if not release or not release.is_anime_release:
         logger.info(f"Post anime relizi emas deb topildi.")
@@ -325,12 +314,10 @@ async def handle_channel_message(event):
 
     logger.info(f"🔥 Yangi reliz aniqlandi: {release.anime_name} - {release.episode}-qism ({release.studio}) -> Bot: {release.bot_username}")
 
-    # 3. Takroriylikni tekshirish
     if is_already_grabbed(release.anime_name, release.season, release.episode, release.studio):
         logger.info(f"⏩ Ushbu qism allaqachon yuklangan: {release.anime_name} Ep {release.episode}")
         return
 
-    # 4. Bazaga qayd qilish
     log_release(
         source_channel=f"@{chat_username}" if chat_username else str(chat.id),
         source_msg_id=msg.id,
@@ -343,7 +330,6 @@ async def handle_channel_message(event):
         status="PENDING"
     )
 
-    # 5. Begona botga ulanib videoni yuklab olish
     if release.bot_username:
         await interact_with_bot_and_grab_video(release)
 
@@ -439,7 +425,7 @@ async def handle_admin_commands(event):
             await reply_or_edit(
                 f"⏳ **AI Avtonom Yuklash:**\n"
                 f"🤖 Bot: `{release.bot_username}`\n"
-                f"🕹 Inline tugmalar va obunalar tekshirilmoqda..."
+                f"🕹 Begona bot inlinelari tekshirilmoqda..."
             )
             
             success, message = await interact_with_bot_and_grab_video(release)
@@ -467,3 +453,4 @@ async def handle_admin_commands(event):
             "• `.help` — Ushbu yordam oynasi"
         )
         await reply_or_edit(help_text)
+EOF
