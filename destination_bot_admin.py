@@ -15,11 +15,11 @@ async def upload_episode_via_admin_flow(
     video_message: types.Message
 ) -> Tuple[bool, str]:
     """
-    Shaxsiy botingizga (@NokoriUzBot / @Tarjima_Animelarrbot) /admin orqali 
-    inline tugmalarni bosib, videoni avtomatik tarzda yuklaydi.
+    Shaxsiy botingizga (@NokoriUzBot) /admin orqali 
+    inline tugmalarni bosib, videoni 100% to'g'ri qism raqami bilan yuklaydi.
     """
     try:
-        logger.info(f"🚀 {dest_bot} botida /admin orqali inline qism qo'shish boshlandi...")
+        logger.info(f"🚀 {dest_bot} botida /admin orqali inline qism qo'shish boshlandi (Anime Kodi: #{unique_code}, Qism: {release.episode})...")
         
         # 1. /admin yuborish
         await client.send_message(dest_bot, "/admin")
@@ -89,28 +89,33 @@ async def upload_episode_via_admin_flow(
             logger.warning(f"Til bosishda xatolik: {e}")
         await asyncio.sleep(1.5)
 
-        # 8. "Tez qism qo'shish" (data=add_episode_fast_...) yoki "Qism qo'shish" ni bosish
+        # 8. "Qism qo'shish" yoki "Tez qism qo'shish" tugmasini bosish
         action_msg = (await client.get_messages(dest_bot, limit=2))[0]
-        logger.info("🔘 'Tezkor qism qo'shish' bosilmoqda...")
-        clicked_add = False
+        logger.info("🔘 'Qism qo'shish' bosilmoqda...")
         if action_msg.reply_markup and isinstance(action_msg.reply_markup, ReplyInlineMarkup):
+            clicked = False
             for row in action_msg.reply_markup.rows:
                 for btn in row.buttons:
                     if isinstance(btn, KeyboardButtonCallback):
-                        if b"add_episode_fast" in (btn.data or b"") or "Tez" in btn.text:
+                        if b"add_episode_" in (btn.data or b""):
                             await action_msg.click(data=btn.data)
-                            clicked_add = True
+                            clicked = True
                             break
-                        elif b"add_episode" in (btn.data or b"") or "Qism qo'shish" in btn.text:
-                            await action_msg.click(data=btn.data)
-                            clicked_add = True
-                            break
-                if clicked_add:
+                if clicked:
                     break
 
         await asyncio.sleep(1.5)
 
-        # 9. Videoni botga yuborish
+        # 9. Bot nima so'rayotganini tekshirish (Masalan: "Qism raqamini kiriting:")
+        step_msgs = await client.get_messages(dest_bot, limit=2)
+        latest_text = (step_msgs[0].text or step_msgs[0].raw_text or "").lower()
+        
+        if "raqamini kiriting" in latest_text or "qism raqami" in latest_text:
+            logger.info(f"🔢 Bot qism raqamini so'radi -> {release.episode} yuborilmoqda...")
+            await client.send_message(dest_bot, str(release.episode))
+            await asyncio.sleep(1.5)
+
+        # 10. Videoni botga yuborish
         caption = (
             f"🎬 **{release.anime_name}** | {release.season}-Mavsum {release.episode}-Qism\n"
             f"🎙 **Dublyaj:** {release.studio}\n"
@@ -124,7 +129,7 @@ async def upload_episode_via_admin_flow(
         )
         await asyncio.sleep(2.0)
 
-        # 10. Bot tasdig'ini tekshirish
+        # 11. Bot tasdig'ini tekshirish
         final_msgs = await client.get_messages(dest_bot, limit=3)
         for m in final_msgs:
             if not m.out and m.text and ("saqlandi" in m.text.lower() or "muvaffaqiyatli" in m.text.lower() or "qabul" in m.text.lower()):
