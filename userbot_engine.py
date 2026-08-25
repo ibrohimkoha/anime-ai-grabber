@@ -9,7 +9,9 @@ from telethon.tl.types import (
     KeyboardButtonUrl, 
     KeyboardButtonCallback, 
     ReplyInlineMarkup,
-    MessageMediaDocument
+    MessageMediaDocument,
+    MessageEntityTextUrl,
+    MessageEntityUrl
 )
 
 from config import (
@@ -48,6 +50,35 @@ def get_monitored_channels() -> List[str]:
     """Kuzatilayotgan kanallar ro'yxatini bazadan oladi."""
     raw = get_setting("target_channels", DEFAULT_TARGET_CHANNELS)
     return [c.strip() for c in raw.split(",") if c.strip()]
+
+def extract_all_links_and_entities_from_msg(msg: types.Message) -> str:
+    """Kanal postidagi barcha yashirin havolalar, matn va inline tugmalarni birlashtiradi."""
+    combined_texts = [msg.text or msg.raw_text or ""]
+    
+    # 1. Yashirin matn havolalari (Entity Links)
+    if msg.entities:
+        for ent in msg.entities:
+            if isinstance(ent, MessageEntityTextUrl) and ent.url:
+                combined_texts.append(f"Havola: {ent.url}")
+            elif isinstance(ent, MessageEntityUrl):
+                offset = ent.offset
+                length = ent.length
+                text_content = msg.raw_text or msg.text or ""
+                url_snippet = text_content[offset:offset+length]
+                if url_snippet:
+                    combined_texts.append(f"Havola: {url_snippet}")
+
+    # 2. Kanal postiga biriktirilgan Inline tugmalar (Inline Buttons)
+    if msg.reply_markup and isinstance(msg.reply_markup, ReplyInlineMarkup):
+        for row in msg.reply_markup.rows:
+            for btn in row.buttons:
+                if isinstance(btn, KeyboardButtonUrl) and btn.url:
+                    combined_texts.append(f"Tugma: '{btn.text}' -> {btn.url}")
+                elif isinstance(btn, KeyboardButtonCallback):
+                    data_str = btn.data.decode(errors="ignore") if btn.data else ""
+                    combined_texts.append(f"Tugma: '{btn.text}' (data={data_str})")
+
+    return "\n".join(combined_texts)
 
 async def join_or_request_chat(url_or_username: str):
     """Kanalga avtomatik a'zo bo'ladi yoki Zayavka (Join Request) yuboradi."""
@@ -272,25 +303,34 @@ async def interact_with_bot_and_grab_video(release: AnimeRelease) -> Tuple[bool,
         return False, str(e)
 
 async def handle_channel_message(event):
-    """Kuzatilayotgan kanallarga yangi post kelganda ishga tushadi."""
+    """Kuzatilayotgan kanallarga yangi post kelganda ishga tushadi (Matn, Yashirin Havola va Inline Tugmalar)."""
     msg = event.message
-    text = msg.text or msg.raw_text or ""
-    if not text:
+    
+    # 1. Barcha matn, linklar va inline tugmalarni olish
+    full_content = extract_all_links_and_entities_from_msg(msg)
+    if not full_content:
         return
 
     chat = await event.get_chat()
     chat_username = getattr(chat, 'username', str(chat.id))
+    chat_title = getattr(chat, 'title', 'Kanal')
     
-    release = await parse_anime_post(text)
+    logger.info(f"📢 Kanalda yangi post aniqlandi: '{chat_title}' (@{chat_username})")
+
+    # 2. DeepSeek orqali post va inline tugmalarni tahlil qilish
+    release = await parse_anime_post(full_content)
     if not release or not release.is_anime_release:
+        logger.info(f"Post anime relizi emas deb topildi.")
         return
 
-    logger.info(f"🔥 Yangi reliz aniqlandi: {release.anime_name} - {release.episode}-qism ({release.studio})")
+    logger.info(f"🔥 Yangi reliz aniqlandi: {release.anime_name} - {release.episode}-qism ({release.studio}) -> Bot: {release.bot_username}")
 
+    # 3. Takroriylikni tekshirish
     if is_already_grabbed(release.anime_name, release.season, release.episode, release.studio):
         logger.info(f"⏩ Ushbu qism allaqachon yuklangan: {release.anime_name} Ep {release.episode}")
         return
 
+    # 4. Bazaga qayd qilish
     log_release(
         source_channel=f"@{chat_username}" if chat_username else str(chat.id),
         source_msg_id=msg.id,
@@ -303,6 +343,7 @@ async def handle_channel_message(event):
         status="PENDING"
     )
 
+    # 5. Begona botga ulanib videoni yuklab olish
     if release.bot_username:
         await interact_with_bot_and_grab_video(release)
 
@@ -341,7 +382,7 @@ async def handle_admin_commands(event):
 
     elif cmd == ".addchannel":
         if not arg:
-            await reply_or_edit("❌ Kanal nomini kiriting: `.addchannel @amediatarjima`")
+            await reply_or_edit("❌ Kanal nomini kiriting: `.addchannel @Uzbekcha_Animelare`")
             return
         ch_name = arg if arg.startswith("@") else f"@{arg}"
         current = get_monitored_channels()
@@ -354,7 +395,7 @@ async def handle_admin_commands(event):
 
     elif cmd == ".delchannel":
         if not arg:
-            await reply_or_edit("❌ O'chiriladigan kanalni kiriting: `.delchannel @amediatarjima`")
+            await reply_or_edit("❌ O'chiriladigan kanalni kiriting: `.delchannel @kanal`")
             return
         ch_name = arg if arg.startswith("@") else f"@{arg}"
         current = get_monitored_channels()
@@ -377,7 +418,7 @@ async def handle_admin_commands(event):
         status_text = (
             "📊 **Anime AI Auto-Grabber Holati:**\n\n"
             f"🤖 **Qabul qiluvchi Bot:** `{current_bot or 'Belgilanmagan'}`\n"
-            f"📢 **Kuzatuvdagi Kanallar:** `{len(channels)} ta`\n"
+            f"📢 **Kuzatuvdagi Kanallar:** `{len(channels)} ta` ({', '.join(channels) if channels else 'yo\\'q'})\n"
             f"✅ **Bazasiga Yuklangan:** `{stats['completed']} ta qism`\n"
             f"⏳ **Jarayonda:** `{stats['pending']} ta`\n"
             f"❌ **Xatolik:** `{stats['failed']} ta`\n\n"
@@ -387,7 +428,7 @@ async def handle_admin_commands(event):
 
     elif cmd == ".grab":
         if not arg:
-            await reply_or_edit("❌ Havolani kiriting: `.grab https://t.me/amediatarjima_bot?start=jjk18`")
+            await reply_or_edit("❌ Havolani kiriting: `.grab https://t.me/AniMacUzbot?start=down_11`")
             return
         
         await reply_or_edit(f"⏳ **AI Avtonom Yuklash Boshlandi...**\n🔗 Havola: `{arg}`\n\n🧠 DeepSeek AI havolani tahlil qilmoqda...")
