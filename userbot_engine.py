@@ -415,10 +415,11 @@ async def handle_admin_commands(event):
         stats = get_stats()
         current_bot = get_current_destination_bot()
         channels = get_monitored_channels()
+        ch_str = ", ".join(channels) if channels else "yo'q"
         status_text = (
             "📊 **Anime AI Auto-Grabber Holati:**\n\n"
             f"🤖 **Qabul qiluvchi Bot:** `{current_bot or 'Belgilanmagan'}`\n"
-            f"📢 **Kuzatuvdagi Kanallar:** `{len(channels)} ta` ({', '.join(channels) if channels else 'yo\\'q'})\n"
+            f"📢 **Kuzatuvdagi Kanallar:** `{len(channels)} ta` ({ch_str})\n"
             f"✅ **Bazasiga Yuklangan:** `{stats['completed']} ta qism`\n"
             f"⏳ **Jarayonda:** `{stats['pending']} ta`\n"
             f"❌ **Xatolik:** `{stats['failed']} ta`\n\n"
