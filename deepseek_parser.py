@@ -150,6 +150,8 @@ async def match_anime_with_existing(
     Boshqa animeni boshqa animega qo'shib yuborishning oldini oladi.
     """
     animes_json = json.dumps(existing_animes, ensure_ascii=False, indent=2)
+    dialog_str = "\n".join(dialog_logs) if dialog_logs else "Muloqot yo'q"
+    
     prompt = f"""
 Siz Telegram Anime Boshqaruv Tizimisiz (DeepSeek V4-Flash).
 Biz yangi video yuklab oldik:
@@ -159,7 +161,7 @@ Biz yangi video yuklab oldik:
 \"\"\"
 - Muloqot tarixi:
 \"\"\"
-{"\n".join(dialog_logs)}
+{dialog_str}
 \"\"\"
 
 Bazada mavjud animelar ro'yxati:
@@ -216,11 +218,12 @@ async def extract_all_episode_buttons_from_menu(buttons: List[Dict[str, Any]]) -
     if not buttons:
         return []
 
+    btns_str = json.dumps(buttons, ensure_ascii=False, indent=2)
     prompt = f"""
 Quyidagi inline tugmalar orasidan qism yuklash tugmalarini (masalan: 1-qism, 2-qism, 3-qism, Ep 1, Ep 2...) ajrating.
 
 Tugmalar:
-{json.dumps(buttons, ensure_ascii=False, indent=2)}
+{btns_str}
 
 Format (Faqat toza JSON):
 {{
