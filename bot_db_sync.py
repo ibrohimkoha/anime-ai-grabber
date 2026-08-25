@@ -1,5 +1,5 @@
 import logging
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, List
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import os
@@ -9,37 +9,65 @@ logger = logging.getLogger("BotDbSync")
 PG_URL_ANIRIOUZ = os.getenv("BOT_DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/aniriouz")
 PG_URL_NOKORI = os.getenv("NOKORI_DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/nokori_go")
 
-def sync_to_aniriouz(clean_title: str, episode_number: int, studio: str, video_file_id: str) -> Optional[int]:
+def get_existing_animes_list() -> List[Dict[str, Any]]:
+    """Bazada mavjud barcha animelar ro'yxatini oladi (DeepSeek solishtirishi uchun)."""
+    conn = None
+    try:
+        conn = psycopg2.connect(PG_URL_ANIRIOUZ, connect_timeout=5)
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("SELECT id, unique_id, title FROM animes ORDER BY unique_id ASC")
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        return [{"id": r["id"], "unique_id": r["unique_id"], "title": r["title"]} for r in rows]
+    except Exception as e:
+        logger.warning(f"Animelar ro'yxatini olishda xatolik: {e}")
+        if conn:
+            conn.close()
+        return []
+
+def sync_to_aniriouz(clean_title: str, episode_number: int, studio: str, video_file_id: str, matched_code: Optional[int] = None) -> Optional[int]:
     """aniriouz (TarjimaAnimelar) bazasiga qo'shadi."""
     conn = None
     try:
         conn = psycopg2.connect(PG_URL_ANIRIOUZ, connect_timeout=5)
         cur = conn.cursor(cursor_factory=RealDictCursor)
         
-        search_pattern = f"%{clean_title}%"
-        cur.execute("""
-            SELECT id, unique_id FROM animes 
-            WHERE LOWER(title) = LOWER(%s) 
-               OR LOWER(original_title) = LOWER(%s) 
-               OR LOWER(title) LIKE LOWER(%s)
-            ORDER BY id ASC LIMIT 1
-        """, (clean_title, clean_title, search_pattern))
-        anime_row = cur.fetchone()
+        anime_id = None
+        unique_id = None
 
-        if anime_row:
-            anime_id = anime_row["id"]
-            unique_id = anime_row["unique_id"]
-        else:
-            cur.execute("SELECT COALESCE(MAX(unique_id), 0) + 1 AS next_code FROM animes")
-            unique_id = cur.fetchone()["next_code"]
+        if matched_code:
+            cur.execute("SELECT id, unique_id FROM animes WHERE unique_id = %s LIMIT 1", (matched_code,))
+            row = cur.fetchone()
+            if row:
+                anime_id = row["id"]
+                unique_id = row["unique_id"]
 
+        if not anime_id:
+            search_pattern = f"%{clean_title}%"
             cur.execute("""
-                INSERT INTO animes (title, original_title, description, genre, type, status, unique_id, image, created_at, updated_at)
-                VALUES (%s, %s, %s, %s, 'TV', 'ONGOING', %s, %s, NOW(), NOW())
-                RETURNING id, unique_id
-            """, (clean_title, clean_title, f"{clean_title} o'zbek tilida", "Anime, Sarguzasht", unique_id, "https://telegra.ph/file/default.jpg"))
-            anime_id = cur.fetchone()["id"]
-            logger.info(f"🎉 [AniRioUz] Yangi anime qo'shildi: {clean_title} (Kod: #{unique_id})")
+                SELECT id, unique_id FROM animes 
+                WHERE LOWER(title) = LOWER(%s) 
+                   OR LOWER(original_title) = LOWER(%s) 
+                   OR LOWER(title) LIKE LOWER(%s)
+                ORDER BY id ASC LIMIT 1
+            """, (clean_title, clean_title, search_pattern))
+            anime_row = cur.fetchone()
+
+            if anime_row:
+                anime_id = anime_row["id"]
+                unique_id = anime_row["unique_id"]
+            else:
+                cur.execute("SELECT COALESCE(MAX(unique_id), 0) + 1 AS next_code FROM animes")
+                unique_id = cur.fetchone()["next_code"]
+
+                cur.execute("""
+                    INSERT INTO animes (title, original_title, description, genre, type, status, unique_id, image, created_at, updated_at)
+                    VALUES (%s, %s, %s, %s, 'TV', 'ONGOING', %s, %s, NOW(), NOW())
+                    RETURNING id, unique_id
+                """, (clean_title, clean_title, f"{clean_title} o'zbek tilida", "Anime, Sarguzasht", unique_id, "https://telegra.ph/file/default.jpg"))
+                anime_id = cur.fetchone()["id"]
+                logger.info(f"🎉 [AniRioUz] Yangi anime qo'shildi: {clean_title} (Kod: #{unique_id})")
 
         # Til
         cur.execute("SELECT id FROM anime_languages WHERE anime_id = %s AND (LOWER(language) = 'uzbekcha' OR LOWER(language) = 'uz') LIMIT 1", (anime_id,))
@@ -70,36 +98,47 @@ def sync_to_aniriouz(clean_title: str, episode_number: int, studio: str, video_f
             conn.close()
         return None
 
-def sync_to_nokori(clean_title: str, episode_number: int, studio: str, video_file_id: str) -> Optional[int]:
+def sync_to_nokori(clean_title: str, episode_number: int, studio: str, video_file_id: str, matched_code: Optional[int] = None) -> Optional[int]:
     """nokori_go (Nokori Anime & Web) bazasiga qo'shadi."""
     conn = None
     try:
         conn = psycopg2.connect(PG_URL_NOKORI, connect_timeout=5)
         cur = conn.cursor(cursor_factory=RealDictCursor)
         
-        search_pattern = f"%{clean_title}%"
-        cur.execute("""
-            SELECT id, unique_id FROM animes 
-            WHERE LOWER(title) = LOWER(%s) 
-               OR LOWER(title) LIKE LOWER(%s)
-            ORDER BY id ASC LIMIT 1
-        """, (clean_title, search_pattern))
-        anime_row = cur.fetchone()
+        anime_id = None
+        unique_id = None
 
-        if anime_row:
-            anime_id = anime_row["id"]
-            unique_id = anime_row["unique_id"]
-        else:
-            cur.execute("SELECT COALESCE(MAX(unique_id), 0) + 1 AS next_code FROM animes")
-            unique_id = cur.fetchone()["next_code"]
+        if matched_code:
+            cur.execute("SELECT id, unique_id FROM animes WHERE unique_id = %s LIMIT 1", (matched_code,))
+            row = cur.fetchone()
+            if row:
+                anime_id = row["id"]
+                unique_id = row["unique_id"]
 
+        if not anime_id:
+            search_pattern = f"%{clean_title}%"
             cur.execute("""
-                INSERT INTO animes (unique_id, title, description, genre, status, studio, dub_studio, video_file_id, created_at, updated_at)
-                VALUES (%s, %s, %s, %s, 'ONGOING', %s, %s, %s, NOW(), NOW())
-                RETURNING id
-            """, (unique_id, clean_title, f"{clean_title} o'zbek tilida", "Anime", studio or "Anime", studio or "UzDub", video_file_id))
-            anime_id = cur.fetchone()["id"]
-            logger.info(f"🎉 [Nokori-Go] Yangi anime qo'shildi: {clean_title} (Kod: #{unique_id})")
+                SELECT id, unique_id FROM animes 
+                WHERE LOWER(title) = LOWER(%s) 
+                   OR LOWER(title) LIKE LOWER(%s)
+                ORDER BY id ASC LIMIT 1
+            """, (clean_title, search_pattern))
+            anime_row = cur.fetchone()
+
+            if anime_row:
+                anime_id = anime_row["id"]
+                unique_id = anime_row["unique_id"]
+            else:
+                cur.execute("SELECT COALESCE(MAX(unique_id), 0) + 1 AS next_code FROM animes")
+                unique_id = cur.fetchone()["next_code"]
+
+                cur.execute("""
+                    INSERT INTO animes (unique_id, title, description, genre, status, studio, dub_studio, video_file_id, created_at, updated_at)
+                    VALUES (%s, %s, %s, %s, 'ONGOING', %s, %s, %s, NOW(), NOW())
+                    RETURNING id
+                """, (unique_id, clean_title, f"{clean_title} o'zbek tilida", "Anime", studio or "Anime", studio or "UzDub", video_file_id))
+                anime_id = cur.fetchone()["id"]
+                logger.info(f"🎉 [Nokori-Go] Yangi anime qo'shildi: {clean_title} (Kod: #{unique_id})")
 
         # Epizod
         cur.execute("""
@@ -125,15 +164,16 @@ def sync_episode_to_bot_database(
     season: int, 
     episode_number: int, 
     studio: str, 
-    video_file_id: str
+    video_file_id: str,
+    matched_unique_id: Optional[int] = None
 ) -> Tuple[bool, str, Optional[int]]:
     """Ikkala bot bazasiga (aniriouz va nokori_go) birdaniga yozadi."""
     clean_title = anime_name.strip()
     if season > 1 and f"{season}-" not in clean_title.lower() and f"season {season}" not in clean_title.lower():
         clean_title = f"{clean_title} {season}-mavsum"
 
-    code_aniriouz = sync_to_aniriouz(clean_title, episode_number, studio, video_file_id)
-    code_nokori = sync_to_nokori(clean_title, episode_number, studio, video_file_id)
+    code_aniriouz = sync_to_aniriouz(clean_title, episode_number, studio, video_file_id, matched_unique_id)
+    code_nokori = sync_to_nokori(clean_title, episode_number, studio, video_file_id, matched_unique_id)
     
     unique_code = code_aniriouz or code_nokori
     if unique_code:

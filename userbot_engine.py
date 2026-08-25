@@ -24,7 +24,13 @@ from config import (
     DEFAULT_DESTINATION_BOT,
     AUTO_JOIN_CHANNELS
 )
-from deepseek_parser import parse_anime_post, decide_inline_action, extract_final_metadata, AnimeRelease
+from deepseek_parser import (
+    parse_anime_post, 
+    decide_inline_action, 
+    match_anime_with_existing, 
+    extract_all_episode_buttons_from_menu,
+    AnimeRelease
+)
 from database import (
     is_already_grabbed, 
     log_release, 
@@ -33,7 +39,10 @@ from database import (
     set_setting,
     get_stats
 )
-from bot_db_sync import sync_episode_to_bot_database
+from bot_db_sync import (
+    sync_episode_to_bot_database, 
+    get_existing_animes_list
+)
 from destination_bot_admin import upload_episode_via_admin_flow
 
 logger = logging.getLogger("UserbotEngine")
@@ -115,15 +124,84 @@ async def extract_and_join_required_channels(msg: types.Message):
                         await join_or_request_chat(url)
                         await asyncio.sleep(1.0)
 
-async def interact_with_bot_and_grab_video(release: AnimeRelease) -> Tuple[bool, Optional[str]]:
+async def process_single_video_message(
+    video_message: types.Message,
+    dialog_logs: List[str],
+    source_bot: str,
+    dest_bot: str
+) -> Tuple[bool, str]:
     """
-    Begona fan-dub boti bilan KO'P BOSQICHLI (MULTI-TURN) muloqot qiladi:
-    1. Obunalar va zayavkalarni yuboradi.
-    2. Inline tugmalarni (Fasl, Til, Sifat, Qism) DeepSeek AI orqali bosib boradi.
-    3. Videoni sug'urib oladi.
-    4. Xabarlar va video sarlavhasidan animening haqiqiy nomini aniqlaydi.
-    5. Ikkala bot bazasiga (aniriouz va nokori_go) avtomatik qo'shadi!
-    6. Shaxsiy botingizga (/admin inline orqali) videoni joylaydi.
+    Qabul qilingan bitta videoni qat'iy AI tahlildan o'tkazib,
+    to'g'ri animega biriktiradi va /admin inline orqali botga yuklaydi.
+    """
+    try:
+        video_caption = video_message.text or video_message.raw_text or ""
+        existing_animes = get_existing_animes_list()
+
+        # 1. Qat'iy semantik taqqoslash (Boshqa animega qo'shib yubormaslik kafolati)
+        match_res = await match_anime_with_existing(
+            video_caption=video_caption,
+            dialog_logs=dialog_logs,
+            existing_animes=existing_animes
+        )
+
+        anime_title = match_res.get("clean_title", "Anime")
+        season = match_res.get("season", 1)
+        episode_num = match_res.get("episode", 1)
+        studio = match_res.get("studio", "UzDub")
+        quality = match_res.get("quality", "720p")
+        matched_unique_id = match_res.get("matched_unique_id")
+
+        logger.info(f"💎 Semantik Tahlil: '{anime_title}' | {season}-mavsum {episode_num}-qism (Match ID: {matched_unique_id})")
+
+        # 2. File ID olish
+        bot_file_id = ""
+        try:
+            bot_file_id = pack_bot_file_id(video_message.media)
+        except Exception:
+            pass
+
+        # 3. PostgreSQL bazalariga yozish
+        db_ok, db_msg, unique_code = sync_episode_to_bot_database(
+            anime_name=anime_title,
+            season=season,
+            episode_number=episode_num,
+            studio=studio,
+            video_file_id=bot_file_id or str(video_message.id),
+            matched_unique_id=matched_unique_id
+        )
+
+        release_obj = AnimeRelease(
+            is_anime_release=True,
+            anime_name=anime_title,
+            season=season,
+            episode=episode_num,
+            studio=studio,
+            quality=quality,
+            bot_username=source_bot
+        )
+
+        # 4. /admin inline orqali shaxsiy botga joylash
+        if dest_bot:
+            logger.info(f"🚀 {dest_bot} ga /admin inline orqali qism yuklanmoqda (#{unique_code} - {episode_num}-qism)...")
+            await upload_episode_via_admin_flow(
+                client=client,
+                dest_bot=dest_bot,
+                release=release_obj,
+                unique_code=unique_code or 1,
+                video_message=video_message
+            )
+
+        update_status(anime_title, season, episode_num, studio, "COMPLETED", video_message.id)
+        return True, f"✅ {anime_title} {episode_num}-qism yuklandi! (Kod: #{unique_code})"
+
+    except Exception as e:
+        logger.error(f"process_single_video_message xatosi: {e}", exc_info=True)
+        return False, str(e)
+
+async def interact_with_bot_and_grab_all_episodes(release: AnimeRelease) -> Tuple[bool, str]:
+    """
+    Begona botdan BITTA EMAS, BARCHA MAVJUD QISMLARNI avtomat tarzda tortib oladi.
     """
     bot = release.bot_username
     start_param = release.start_param
@@ -132,34 +210,39 @@ async def interact_with_bot_and_grab_video(release: AnimeRelease) -> Tuple[bool,
     logger.info(f"🤖 Begona botga so'rov yuborilmoqda: {bot} -> /start {start_param}")
     
     try:
-        # 1. Botga /start yuborish
         start_cmd = f"/start {start_param}" if start_param else "/start"
         await client.send_message(bot, start_cmd)
         
-        video_message = None
-        clicked_history = set()
         dialog_logs = [f"Yuborildi: {start_cmd}"]
+        clicked_history = set()
+        processed_video_ids = set()
+        total_grabbed = 0
 
-        # 2. Ko'p bosqichli AI Avtonom Navigatsiya (7 qadamgacha)
-        for turn in range(1, 8):
+        for turn in range(1, 10):
             await asyncio.sleep(2.5)
             
-            recent_msgs = await client.get_messages(bot, limit=5)
+            recent_msgs = await client.get_messages(bot, limit=8)
             
-            # A) Agar video kelgan bo'lsa -> To'xtatish
+            # A) Kelgan barcha yangi videolarni qayta ishlash
+            new_videos = []
             for m in recent_msgs:
                 if not m.out and (m.video or (m.document and "video" in (m.document.mime_type or ""))):
-                    video_message = m
-                    break
-            
-            if video_message:
-                logger.info(f"🎉 Video topildi! (Turn {turn})")
-                break
+                    if m.id not in processed_video_ids:
+                        new_videos.append(m)
+                        processed_video_ids.add(m.id)
 
-            # B) Eng so'nggi bot xabarini tahlil qilish
+            if new_videos:
+                logger.info(f"🎉 {len(new_videos)} ta yangi video topildi! (Turn {turn})")
+                for v in new_videos:
+                    ok, res_str = await process_single_video_message(v, dialog_logs, bot, dest_bot)
+                    if ok:
+                        total_grabbed += 1
+                    await asyncio.sleep(1.5)
+
+            # B) Botning so'nggi xabarini tahlil qilish
             latest_bot_msg = None
             for m in recent_msgs:
-                if not m.out:
+                if not m.out and m.reply_markup:
                     latest_bot_msg = m
                     break
 
@@ -169,10 +252,8 @@ async def interact_with_bot_and_grab_video(release: AnimeRelease) -> Tuple[bool,
             bot_text = latest_bot_msg.text or latest_bot_msg.raw_text or ""
             dialog_logs.append(f"Bot xabari: {bot_text}")
 
-            # Majburiy kanallarni topish va a'zo bo'lish
             await extract_and_join_required_channels(latest_bot_msg)
 
-            # Inline tugmalarni tahlil qilish
             if latest_bot_msg.reply_markup and isinstance(latest_bot_msg.reply_markup, ReplyInlineMarkup):
                 buttons_list = []
                 idx = 0
@@ -189,9 +270,37 @@ async def interact_with_bot_and_grab_video(release: AnimeRelease) -> Tuple[bool,
                             idx += 1
 
                 if buttons_list:
-                    btn_texts = [b["text"] for b in buttons_list]
-                    dialog_logs.append(f"Mavjud tugmalar: {btn_texts}")
+                    # 1. Barcha qismlar tugmalari bormi tekshirish
+                    ep_buttons = await extract_all_episode_buttons_from_menu(buttons_list)
+                    
+                    if ep_buttons and len(ep_buttons) > 1:
+                        logger.info(f"📋 Topilgan qismlar soni: {len(ep_buttons)} ta. Hammasi ketma-ket yuklanadi...")
+                        for ep_b in ep_buttons:
+                            b_text = ep_b["text"]
+                            logger.info(f"👉 Bosilmoqda: '{b_text}'...")
+                            try:
+                                await latest_bot_msg.click(text=b_text)
+                            except Exception:
+                                try:
+                                    await latest_bot_msg.click(ep_b["index"])
+                                except Exception:
+                                    pass
 
+                            # Videoni kutish (15s)
+                            for _ in range(12):
+                                await asyncio.sleep(1.5)
+                                ms = await client.get_messages(bot, limit=3)
+                                for vm in ms:
+                                    if not vm.out and (vm.video or (vm.document and "video" in (vm.document.mime_type or ""))):
+                                        if vm.id not in processed_video_ids:
+                                            processed_video_ids.add(vm.id)
+                                            ok, res_str = await process_single_video_message(vm, dialog_logs, bot, dest_bot)
+                                            if ok:
+                                                total_grabbed += 1
+                                            break
+                        break
+
+                    # 2. Agar yakka bosqichli menyu bo'lsa (Fasl/Til/Sifat)
                     decision = await decide_inline_action(
                         target_anime=release.anime_name,
                         target_episode=release.episode,
@@ -202,99 +311,37 @@ async def interact_with_bot_and_grab_video(release: AnimeRelease) -> Tuple[bool,
                     if decision:
                         chosen_text = decision.get("selected_text")
                         b_idx = decision.get("button_index", 0)
-                        reason = decision.get("reason", "")
                         
                         btn_key = f"{latest_bot_msg.id}_{chosen_text}"
                         if btn_key in clicked_history and len(buttons_list) > 1:
-                            logger.info(f"Qayta bosilish oldi olindi, navbatdagi tugma bosiladi.")
                             b_idx = (b_idx + 1) % len(buttons_list)
                             chosen_text = buttons_list[b_idx]["text"]
 
                         clicked_history.add(btn_key)
                         dialog_logs.append(f"Bosildi: {chosen_text}")
-                        logger.info(f"🎯 AI Qadami ({turn}): '{chosen_text}' bosilmoqda (Sabab: {reason})")
+                        logger.info(f"🎯 AI Qadami ({turn}): '{chosen_text}' bosilmoqda...")
                         
                         try:
                             await latest_bot_msg.click(text=chosen_text)
                         except Exception as e:
-                            logger.warning(f"Matn bo'yicha bosishda xatolik: {e}, index={b_idx} bosilmoqda")
                             try:
                                 await latest_bot_msg.click(b_idx)
-                            except Exception as ex:
-                                logger.error(f"Tugma bosish amalga oshmadi: {ex}")
+                            except Exception:
+                                pass
 
-        if not video_message:
-            logger.warning(f"Video fayl kelmadi ({release.anime_name} - {release.episode}-qism)")
-            return False, "Video topilmadi yoki bot javob bermadi"
-
-        logger.info(f"✅ Video muvaffaqiyatli qabul qilindi! ID={video_message.id}")
-
-        # 3. Video va butun dialogdan HAQIQIY Anime Nomini aniqlash (DeepSeek Final Metadata)
-        video_caption = video_message.text or video_message.raw_text or ""
-        final_meta = await extract_final_metadata(
-            bot_username=bot,
-            start_param=start_param,
-            dialog_logs=dialog_logs,
-            video_caption=video_caption,
-            default_anime=release.anime_name,
-            default_ep=release.episode
-        )
-        logger.info(f"💎 Aniqlandi: {final_meta.anime_name} | {final_meta.season}-mavsum {final_meta.episode}-qism ({final_meta.studio})")
-
-        # 4. Telegram Bot API standartidagi `file_id` ni olish
-        bot_file_id = ""
-        try:
-            bot_file_id = pack_bot_file_id(video_message.media)
-            logger.info(f"📦 Telegram Bot File ID: {bot_file_id[:30]}...")
-        except Exception as e:
-            logger.warning(f"File ID generatsiyasida xatolik: {e}")
-
-        # 5. PostgreSQL bazalariga avtomatik qo'shish (AniRioUz va Nokori-Go)
-        db_synced, db_msg, unique_code = sync_episode_to_bot_database(
-            anime_name=final_meta.anime_name,
-            season=final_meta.season,
-            episode_number=final_meta.episode,
-            studio=final_meta.studio,
-            video_file_id=bot_file_id or str(video_message.id)
-        )
-
-        # 6. Shaxsiy botingizga (/admin inline menyusi orqali) yuklash
-        if dest_bot:
-            logger.info(f"🚀 {dest_bot} botiga /admin inline orqali yuklanmoqda...")
-            admin_ok, admin_msg = await upload_episode_via_admin_flow(
-                client=client,
-                dest_bot=dest_bot,
-                release=final_meta,
-                unique_code=unique_code or 1,
-                video_message=video_message
-            )
-            update_status(
-                final_meta.anime_name, 
-                final_meta.season, 
-                final_meta.episode, 
-                final_meta.studio, 
-                "COMPLETED", 
-                video_message.id
-            )
+        if total_grabbed > 0:
+            return True, f"Jami {total_grabbed} ta qism muvaffaqiyatli yuklandi va botga qo'shildi!"
+        elif len(processed_video_ids) > 0:
+            return True, "Videolar muvaffaqiyatli qabul qilindi va botga uzatildi!"
         else:
-            update_status(
-                final_meta.anime_name, 
-                final_meta.season, 
-                final_meta.episode, 
-                final_meta.studio, 
-                "COMPLETED", 
-                video_message.id
-            )
-
-        return True, f"Muvaffaqiyatli yuklandi va inline /admin orqali botga joylandi! (Kod: #{unique_code}, Anime: {final_meta.anime_name})"
+            return False, "Botdan video kelmadi yoki qismlar topilmadi"
 
     except Exception as e:
-        logger.error(f"Bot bilan muloqotda xatolik: {e}", exc_info=True)
-        update_status(release.anime_name, release.season, release.episode, release.studio, "FAILED")
+        logger.error(f"interact_with_bot_and_grab_all_episodes xatosi: {e}", exc_info=True)
         return False, str(e)
 
 async def handle_channel_message(event):
-    """Kuzatilayotgan kanallarga yangi post kelganda ishga tushadi (Matn, Yashirin Havola va Inline Tugmalar)."""
+    """Kuzatilayotgan kanallarga yangi post kelganda ishga tushadi."""
     msg = event.message
     
     full_content = extract_all_links_and_entities_from_msg(msg)
@@ -309,10 +356,9 @@ async def handle_channel_message(event):
 
     release = await parse_anime_post(full_content)
     if not release or not release.is_anime_release:
-        logger.info(f"Post anime relizi emas deb topildi.")
         return
 
-    logger.info(f"🔥 Yangi reliz aniqlandi: {release.anime_name} - {release.episode}-qism ({release.studio}) -> Bot: {release.bot_username}")
+    logger.info(f"🔥 Yangi reliz: {release.anime_name} ({release.studio}) -> Bot: {release.bot_username}")
 
     if is_already_grabbed(release.anime_name, release.season, release.episode, release.studio):
         logger.info(f"⏩ Ushbu qism allaqachon yuklangan: {release.anime_name} Ep {release.episode}")
@@ -331,7 +377,7 @@ async def handle_channel_message(event):
     )
 
     if release.bot_username:
-        await interact_with_bot_and_grab_video(release)
+        await interact_with_bot_and_grab_all_episodes(release)
 
 # ==========================================================
 # 📱 TELEGRAM ICHIDAN BOSHQARISH BUYRUQLARI (ADMIN COMMANDS)
@@ -356,7 +402,7 @@ async def handle_admin_commands(event):
 
     if cmd == ".setbot":
         if not arg:
-            await reply_or_edit("❌ Bot nomini kiriting: `.setbot @Tarjima_Animelarrbot`")
+            await reply_or_edit("❌ Bot nomini kiriting: `.setbot @NokoriUzBot`")
             return
         bot_name = arg if arg.startswith("@") else f"@{arg}"
         set_setting("destination_bot", bot_name)
@@ -418,21 +464,21 @@ async def handle_admin_commands(event):
             await reply_or_edit("❌ Havolani kiriting: `.grab https://t.me/AniMacUzbot?start=down_11`")
             return
         
-        await reply_or_edit(f"⏳ **AI Avtonom Yuklash Boshlandi...**\n🔗 Havola: `{arg}`\n\n🧠 DeepSeek AI havolani tahlil qilmoqda...")
+        await reply_or_edit(f"⏳ **AI Avtonom Yuklash Boshlandi...**\n🔗 Havola: `{arg}`\n\n🧠 DeepSeek AI barcha qismlarni va inlinelarni tahlil qilmoqda...")
         
         release = await parse_anime_post(f"Anime yuklash: {arg}")
         if release and release.bot_username:
             await reply_or_edit(
-                f"⏳ **AI Avtonom Yuklash:**\n"
+                f"⏳ **AI Batch Yuklash Jarayonda:**\n"
                 f"🤖 Bot: `{release.bot_username}`\n"
-                f"🕹 Begona bot inlinelari tekshirilmoqda..."
+                f"🕹 Barcha qismlar ketma-ket yuklanmoqda va tahlil qilinmoqda..."
             )
             
-            success, message = await interact_with_bot_and_grab_video(release)
+            success, message = await interact_with_bot_and_grab_all_episodes(release)
             if success:
                 await reply_or_edit(
                     f"🎉 **Muvaffaqiyatli Yakunlandi!**\n\n"
-                    f"📦 **Holat:** {message}\n"
+                    f"📦 **Natija:** {message}\n"
                     f"🤖 **Yetkazildi:** `{get_current_destination_bot()}`"
                 )
             else:
@@ -443,7 +489,7 @@ async def handle_admin_commands(event):
     elif cmd == ".help":
         help_text = (
             "🛠 **Anime AI Grabber Telegram Buyruqlari:**\n\n"
-            "• `.grab <havola>` — Istalgan bot havolasini avtonom yuklash va bazaga qo'shish\n"
+            "• `.grab <havola>` — Istalgan bot havolasidagi barcha qismlarni avtonom yuklash va bazaga qo'shish\n"
             "• `.setbot @BotNomi` — Videolar borishi kerak bo'lgan botni o'zgartirish\n"
             "• `.bot` — Joriy qabul qiluvchi botni ko'rish\n"
             "• `.channels` — Kuzatilayotgan kanallar ro'yxati\n"
