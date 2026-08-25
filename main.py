@@ -18,14 +18,11 @@ from userbot_engine import (
 )
 from deepseek_parser import parse_anime_post
 
-# Logging sozlamalari
+# Oddiy va xavfsiz logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler("anime_grabber.log", encoding="utf-8")
-    ]
+    stream=sys.stdout
 )
 logger = logging.getLogger("Main")
 
@@ -62,15 +59,17 @@ async def main():
 
     if not API_ID or not API_HASH:
         logger.error("❌ Xatolik: .env faylida TELEGRAM_API_ID va TELEGRAM_API_HASH ko'rsatilmagan!")
-        logger.info("👉 Iltimos, https://my.telegram.org ga kirib API ID va HASH oling va .env ga yozing.")
         return
 
     # 2. Telegramga ulanish
-    logger.info("🚀 Telegram Userbot ishga tushmoqda...")
-    await client.start(phone=PHONE_NUMBER if PHONE_NUMBER else None)
+    logger.info("🚀 Telegram Userbot ulanmoqda...")
+    await client.connect()
+    if not await client.is_user_authorized():
+        logger.info("Avtorizatsiya kodi so'ralmoqda...")
+        await client.start(phone=PHONE_NUMBER if PHONE_NUMBER else None)
     
     me = await client.get_me()
-    logger.info(f"✅ Userbot muvaffaqiyatli ulandi: {me.first_name} (@{me.username or me.id})")
+    logger.info(f"✅ Userbot muvaffaqiyatli ulandi: {me.first_name} (@{getattr(me, 'username', me.id)})")
     logger.info(f"🤖 Qabul qiluvchi bot: {get_current_destination_bot()}")
     logger.info(f"📢 Kuzatilayotgan kanallar: {get_monitored_channels()}")
 
@@ -100,6 +99,6 @@ if __name__ == "__main__":
         asyncio.run(test_mode(test_text))
     else:
         try:
-            asyncio.run(main())
+            client.loop.run_until_complete(main())
         except KeyboardInterrupt:
             logger.info("Dastur to'xtatildi.")
